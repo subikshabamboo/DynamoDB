@@ -1,0 +1,5 @@
+DATA FROM LAPTOP 1
+This file is written by Node 1 during mutual exclusion demo.
+Timestamp: Written using Ricart-Agrawala algorithm.
+Both laptops tried to write this key simultaneously.
+Node 1 got permission first based on Lamport timestamp.

@@ -1,0 +1,21 @@
+LARGE DATA FILE FOR DEADLOCK DEMO
+====================================
+
+This file is used to demonstrate deadlock handling using DAG (Wait-For Graph).
+
+Scenario:
+- Node 1 locks Resource A, then tries to lock Resource B
+- Node 2 locks Resource B, then tries to lock Resource A
+- This creates a circular dependency (deadlock)
+- The Wait-For Graph (DAG) detects the cycle using DFS
+- System resolves by aborting one transaction
+
+DAG Algorithm (Wait-For Graph):
+- Directed graph where edges represent "waiting for" relationships
+- Node X → Node Y means "X is waiting for Y to release a resource"
+- Cycle in the graph = DEADLOCK
+- DFS traversal detects cycles
+- Resolution: abort one transaction in the cycle to break it
+
+This demonstrates fault tolerance in our distributed system.
+The system detects and resolves deadlocks automatically.
