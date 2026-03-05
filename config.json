@@ -18,5 +18,9 @@
     ],
     "heartbeat_interval_ms": 3000,
     "election_timeout_ms": 5000,
-    "deadlock_timeout_ms": 5000
+    "deadlock_timeout_ms": 5000,
+    "partition": {
+        "enabled": true,
+        "replication_factor": 3
+    }
 }

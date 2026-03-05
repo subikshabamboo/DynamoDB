@@ -1,6 +1,7 @@
 package node
 
 import (
+	"dynamo-go/partition"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,12 +15,19 @@ type NodeConfig struct {
 	Port int    `json:"port"`
 }
 
+// PartitionConfig represents partitioning configuration
+type PartitionConfig struct {
+	Enabled           bool `json:"enabled"`
+	ReplicationFactor int  `json:"replication_factor"`
+}
+
 // Config represents the complete cluster configuration
 type Config struct {
-	Nodes             []NodeConfig `json:"nodes"`
-	HeartbeatInterval int          `json:"heartbeat_interval_ms"`
-	ElectionTimeout   int          `json:"election_timeout_ms"`
-	DeadlockTimeout   int          `json:"deadlock_timeout_ms"`
+	Nodes             []NodeConfig    `json:"nodes"`
+	HeartbeatInterval int             `json:"heartbeat_interval_ms"`
+	ElectionTimeout   int             `json:"election_timeout_ms"`
+	DeadlockTimeout   int             `json:"deadlock_timeout_ms"`
+	Partition         PartitionConfig `json:"partition"`
 }
 
 // StoredItem represents data stored with timestamp
@@ -48,21 +56,21 @@ type DeadlockDetector interface {
 
 // Node represents a single node in the distributed system
 type Node struct {
-	ID            int
-	IP            string
-	Port          int
-	Config        *Config
-	DataStore     map[string]StoredItem
-	DataMutex     sync.RWMutex
+	ID        int
+	IP        string
+	Port      int
+	Config    *Config
+	DataStore map[string]StoredItem
+	DataMutex sync.RWMutex
 
 	// Lamport Clock for logical timestamps
-	LamportClock  int64
-	ClockMutex    sync.Mutex
+	LamportClock int64
+	ClockMutex   sync.Mutex
 
 	// Leader Election
-	LeaderID      int
-	IsLeader      bool
-	LeaderMutex   sync.RWMutex
+	LeaderID    int
+	IsLeader    bool
+	LeaderMutex sync.RWMutex
 
 	// Mutual Exclusion (Ricart-Agrawala)
 	RequestingCS  bool
@@ -73,8 +81,9 @@ type Node struct {
 	CSChan        chan bool
 
 	// Managers (set from main.go to avoid circular imports)
-	MutexMgr      MutexManager
-	DeadlockMgr   DeadlockDetector
+	MutexMgr     MutexManager
+	DeadlockMgr  DeadlockDetector
+	PartitionMgr *partition.PartitionManager
 }
 
 // DeferredRequest represents a deferred reply in Ricart-Agrawala
@@ -109,6 +118,21 @@ func NewNode(id int, config *Config) *Node {
 		}
 	}
 
+	// Create partition manager based on config
+	partitionConfig := config.Partition
+	if partitionConfig.ReplicationFactor == 0 {
+		partitionConfig.ReplicationFactor = 3 // Default to 3
+	}
+	partitionMgr := partition.NewPartitionManager(
+		partitionConfig.Enabled,
+		partitionConfig.ReplicationFactor,
+	)
+
+	// Initialize all nodes in the partition ring
+	for _, nc := range config.Nodes {
+		partitionMgr.AddNode(nc.ID)
+	}
+
 	return &Node{
 		ID:            id,
 		IP:            nodeConfig.IP,
@@ -121,6 +145,7 @@ func NewNode(id int, config *Config) *Node {
 		RequestingCS:  false,
 		DeferredQueue: make([]DeferredRequest, 0),
 		CSChan:        make(chan bool, 1),
+		PartitionMgr:  partitionMgr,
 	}
 }
 

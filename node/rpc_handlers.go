@@ -38,7 +38,9 @@ type GetReply struct {
 
 // DeleteArgs arguments for Delete operation
 type DeleteArgs struct {
-	Key string
+	Key       string
+	Timestamp int64
+	IsReplica bool // If true, this is a propagated deletion
 }
 
 // DeleteReply response for Delete operation
@@ -47,7 +49,7 @@ type DeleteReply struct {
 	Message string
 }
 
-// Put stores a key-value pair and replicates to other nodes
+// Put stores a key-value pair and replicates to other nodes based on partitioning
 func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 	n.UpdateClock(args.Timestamp)
 
@@ -65,11 +67,11 @@ func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 		fmt.Printf("[Node %d] REPLICATED: key='%s', size=%d bytes\n",
 			n.ID, args.Key, len(args.Value))
 	} else {
-		// Replicate to all other nodes
+		// Replicate to partition-assigned nodes
 		fmt.Printf("[Node %d] PUT: key='%s', size=%d bytes, timestamp=%d\n",
 			n.ID, args.Key, len(args.Value), args.Timestamp)
 
-		replicatedTo := n.replicateToOthers(args.Key, args.Value, args.Timestamp)
+		replicatedTo := n.replicateToPartitionNodes(args.Key, args.Value, args.Timestamp)
 		reply.Replicated = true
 		reply.Message = fmt.Sprintf("Stored key '%s' on Node %d, replicated to: %s",
 			args.Key, n.ID, strings.Join(replicatedTo, ", "))
@@ -78,12 +80,36 @@ func (n *Node) Put(args *PutArgs, reply *PutReply) error {
 	return nil
 }
 
-// replicateToOthers sends data to all other nodes
-func (n *Node) replicateToOthers(key string, value []byte, timestamp int64) []string {
-	otherNodes := n.GetOtherNodes()
+// replicateToPartitionNodes sends data to partition-assigned replica nodes
+// Respects the partitioning configuration - if disabled, replicates to all other nodes
+func (n *Node) replicateToPartitionNodes(key string, value []byte, timestamp int64) []string {
 	results := make([]string, 0)
 
-	for _, nodeID := range otherNodes {
+	// Determine which nodes should store this key
+	var targetNodes []int
+
+	if n.PartitionMgr.IsEnabled() {
+		// Partitioning enabled: use consistent hashing to determine replicas
+		partitionOwners := n.PartitionMgr.GetPartitionOwners(key)
+
+		// Filter out current node (we already stored it)
+		for _, nodeID := range partitionOwners {
+			if nodeID != n.ID {
+				targetNodes = append(targetNodes, nodeID)
+			}
+		}
+
+		fmt.Printf("[Node %d] PARTITION-AWARE REPLICATION: key='%s' to nodes %v\n",
+			n.ID, key, partitionOwners)
+	} else {
+		// Full replication: replicate to all other nodes
+		targetNodes = n.GetOtherNodes()
+		fmt.Printf("[Node %d] FULL REPLICATION: key='%s' to all other nodes\n",
+			n.ID, key)
+	}
+
+	// Send replication to target nodes
+	for _, nodeID := range targetNodes {
 		address := n.GetNodeAddress(nodeID)
 		client, err := rpc.Dial("tcp", address)
 		if err != nil {
@@ -138,26 +164,73 @@ func (n *Node) Get(args *GetArgs, reply *GetReply) error {
 	return nil
 }
 
-// Delete removes a key-value pair
+// Delete removes a key-value pair and propagates deletion to replica nodes
 func (n *Node) Delete(args *DeleteArgs, reply *DeleteReply) error {
-	n.IncrementClock()
+	n.UpdateClock(args.Timestamp)
 
 	n.DataMutex.Lock()
-	defer n.DataMutex.Unlock()
-
 	_, found := n.DataStore[args.Key]
 	if found {
 		delete(n.DataStore, args.Key)
-		reply.Success = true
-		reply.Message = fmt.Sprintf("Deleted key '%s' from Node %d", args.Key, n.ID)
-		fmt.Printf("[Node %d] DELETE: key='%s', success=true\n", n.ID, args.Key)
+	}
+	n.DataMutex.Unlock()
+
+	reply.Success = found
+
+	if args.IsReplica {
+		reply.Message = fmt.Sprintf("Deleted key '%s' from Node %d (replica)", args.Key, n.ID)
+		fmt.Printf("[Node %d] DELETED (replica): key='%s'\n", n.ID, args.Key)
 	} else {
-		reply.Success = false
-		reply.Message = fmt.Sprintf("Key '%s' not found on Node %d", args.Key, n.ID)
-		fmt.Printf("[Node %d] DELETE: key='%s', not found\n", n.ID, args.Key)
+		if found {
+			fmt.Printf("[Node %d] DELETE: key='%s', success=true, timestamp=%d\n", n.ID, args.Key, args.Timestamp)
+
+			// Propagate deletion to partition-assigned replicas
+			if n.PartitionMgr.IsEnabled() {
+				partitionOwners := n.PartitionMgr.GetPartitionOwners(args.Key)
+				for _, nodeID := range partitionOwners {
+					if nodeID != n.ID {
+						go n.propagateDelete(nodeID, args.Key, args.Timestamp)
+					}
+				}
+			} else {
+				// Full replication: propagate to all other nodes
+				for _, nodeID := range n.GetOtherNodes() {
+					go n.propagateDelete(nodeID, args.Key, args.Timestamp)
+				}
+			}
+
+			reply.Message = fmt.Sprintf("Deleted key '%s' from Node %d", args.Key, n.ID)
+		} else {
+			reply.Message = fmt.Sprintf("Key '%s' not found on Node %d", args.Key, n.ID)
+			fmt.Printf("[Node %d] DELETE: key='%s', not found\n", n.ID, args.Key)
+		}
 	}
 
 	return nil
+}
+
+// propagateDelete sends deletion to a specific node
+func (n *Node) propagateDelete(nodeID int, key string, timestamp int64) {
+	address := n.GetNodeAddress(nodeID)
+	client, err := rpc.Dial("tcp", address)
+	if err != nil {
+		fmt.Printf("[Node %d] Cannot propagate delete to Node %d: %v\n", n.ID, nodeID, err)
+		return
+	}
+	defer client.Close()
+
+	deleteArgs := &DeleteArgs{
+		Key:       key,
+		Timestamp: timestamp,
+		IsReplica: true,
+	}
+	var deleteReply DeleteReply
+	err = client.Call("Node.Delete", deleteArgs, &deleteReply)
+	if err != nil {
+		fmt.Printf("[Node %d] Propagate delete to Node %d failed: %v\n", n.ID, nodeID, err)
+	} else {
+		fmt.Printf("[Node %d] Propagated delete for key '%s' to Node %d\n", n.ID, key, nodeID)
+	}
 }
 
 // ===== Leader Election (Bully Algorithm) =====
@@ -343,12 +416,12 @@ func (n *Node) MutexPut(args *MutexPutArgs, reply *MutexPutReply) error {
 		fmt.Printf("[Node %d] MUTEX-PUT: Stored key '%s' locally inside Critical Section\n", n.ID, args.Key)
 
 		// Replicate to other nodes (still inside CS for consistency)
-		n.replicateToOthers(args.Key, args.Value, args.Timestamp)
+		n.replicateToPartitionNodes(args.Key, args.Value, args.Timestamp)
 	})
 
 	if success {
 		reply.Success = true
-		reply.Message = fmt.Sprintf("Key '%s' stored with mutual exclusion (Ricart-Agrawala) and replicated to all nodes", args.Key)
+		reply.Message = fmt.Sprintf("Key '%s' stored with mutual exclusion (Ricart-Agrawala) and replicated", args.Key)
 		fmt.Printf("[Node %d] ===== MUTEX-PUT COMPLETE for key '%s' =====\n", n.ID, args.Key)
 	} else {
 		reply.Success = false
@@ -600,6 +673,48 @@ func (n *Node) ListKeys(args *ListKeysArgs, reply *ListKeysReply) error {
 	for key := range n.DataStore {
 		reply.Keys = append(reply.Keys, key)
 	}
+
+	return nil
+}
+
+// ===== Partition Management =====
+
+// PartitionInfoArgs arguments for partition info request
+type PartitionInfoArgs struct {
+	Key string
+}
+
+// PartitionInfoReply response with partition ownership information
+type PartitionInfoReply struct {
+	Key               string
+	Owners            []int // List of node IDs that own this key
+	Primary           int   // Primary owner (first in the list)
+	Replicas          []int // Replica nodes (rest of the list)
+	IsPartitioned     bool  // Whether partitioning is enabled
+	ReplicationFactor int   // Current replication factor
+	Message           string
+}
+
+// GetPartitionInfo returns which nodes are responsible for a given key
+func (n *Node) GetPartitionInfo(args *PartitionInfoArgs, reply *PartitionInfoReply) error {
+	reply.Key = args.Key
+	reply.IsPartitioned = n.PartitionMgr.IsEnabled()
+	reply.ReplicationFactor = n.PartitionMgr.GetReplicationFactor()
+
+	owners := n.PartitionMgr.GetPartitionOwners(args.Key)
+	reply.Owners = owners
+
+	if len(owners) > 0 {
+		reply.Primary = owners[0]
+		if len(owners) > 1 {
+			reply.Replicas = owners[1:]
+		}
+		reply.Message = n.PartitionMgr.DescribePartition(args.Key)
+	} else {
+		reply.Message = "All nodes store this key (no partitioning)"
+	}
+
+	fmt.Printf("[Node %d] GetPartitionInfo: key='%s', owners=%v\n", n.ID, args.Key, owners)
 
 	return nil
 }

@@ -1,0 +1,3 @@
+Hello, this is a test file for the distributed system demo.
+This file will be stored on Node 1 and retrieved from Node 2.
+Demonstrating distributed storage across multiple machines.

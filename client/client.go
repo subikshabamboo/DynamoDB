@@ -34,6 +34,7 @@ func main() {
 	fmt.Println("  put <node_id> <key> <filename>  - Store file (replicated)")
 	fmt.Println("  get <node_id> <key>             - Retrieve file")
 	fmt.Println("  delete <node_id> <key>          - Delete key")
+	fmt.Println("  partition-info <node_id> <key>  - Show partition ownership")
 	fmt.Println("  status                          - Show all nodes status")
 	fmt.Println("  status <node_id>                - Show specific node status")
 	fmt.Println("  list <node_id>                  - List keys on node")
@@ -72,6 +73,8 @@ func main() {
 			handleStatus(parts)
 		case "list":
 			handleList(parts)
+		case "partition-info":
+			handlePartitionInfo(parts)
 		case "mutex-put":
 			handleMutexPut(parts)
 		case "deadlock-test":
@@ -461,6 +464,62 @@ func handleList(parts []string) {
 	}
 }
 
+func handlePartitionInfo(parts []string) {
+	if len(parts) < 3 {
+		fmt.Println("Usage: partition-info <node_id> <key>")
+		fmt.Println("Example: partition-info 1 mykey")
+		fmt.Println("Shows which nodes are responsible for storing a key")
+		return
+	}
+
+	nodeID, err := strconv.Atoi(parts[1])
+	if err != nil {
+		fmt.Println("Invalid node ID")
+		return
+	}
+
+	key := parts[2]
+
+	client, err := connectToNode(nodeID)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer client.Close()
+
+	args := &node.PartitionInfoArgs{Key: key}
+	var reply node.PartitionInfoReply
+
+	err = client.Call("Node.GetPartitionInfo", args, &reply)
+	if err != nil {
+		fmt.Printf("RPC Error: %v\n", err)
+		return
+	}
+
+	fmt.Println("====================================")
+	fmt.Printf("Partition Info for Key: '%s'\n", key)
+	fmt.Println("====================================")
+	fmt.Printf("Partitioning Enabled: %v\n", reply.IsPartitioned)
+	fmt.Printf("Replication Factor: %d\n", reply.ReplicationFactor)
+
+	if len(reply.Owners) > 0 {
+		fmt.Printf("Primary Owner: Node %d\n", reply.Primary)
+		if len(reply.Replicas) > 0 {
+			fmt.Print("Replicas: ")
+			for i, replicaID := range reply.Replicas {
+				if i > 0 {
+					fmt.Print(", ")
+				}
+				fmt.Printf("Node %d", replicaID)
+			}
+			fmt.Println()
+		}
+	}
+
+	fmt.Printf("\n%s\n", reply.Message)
+	fmt.Println("====================================")
+}
+
 // handleMutexPut - REAL mutual exclusion using Ricart-Agrawala via RPC
 func handleMutexPut(parts []string) {
 	if len(parts) < 3 {
@@ -779,6 +838,11 @@ func printHelp() {
 	fmt.Println("")
 	fmt.Println("  list <node_id>")
 	fmt.Println("      List all keys on specific node")
+	fmt.Println("")
+	fmt.Println("Partitioning:")
+	fmt.Println("  partition-info <node_id> <key>")
+	fmt.Println("      Show partition ownership info for a key")
+	fmt.Println("      (shows which nodes store this key)")
 	fmt.Println("")
 	fmt.Println("Advanced (Algorithms Demo):")
 	fmt.Println("  mutex-put <key> <filename>")

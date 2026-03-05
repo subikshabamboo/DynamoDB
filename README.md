@@ -6,11 +6,12 @@ This project implements a **simplified DynamoDB-style distributed database from 
 
 - 3 nodes (servers) run on 3 different machines (or 3 terminals for testing)
 - Each node stores data in-memory (key-value pairs)
-- Data is **automatically replicated** to all nodes when stored
+- Data is **automatically replicated** to all nodes when stored (default) or partitioned via consistent hashing (optional)
 - One node is elected as **leader** using Bully Algorithm
 - **Mutual Exclusion** ensures only one node writes at a time (Ricart-Agrawala)
 - **Deadlock Detection** uses a Wait-For Graph (DAG) with DFS cycle detection
 - All communication happens via **GoRPC** (Go's built-in RPC)
+- **Optional: Data Partitioning** with consistent hashing for scalability
 
 ### Real-World Mapping
 
@@ -60,12 +61,25 @@ dynamo-go/
 │   │                          - Address helpers: GetNodeAddress, GetOtherNodes
 │   │
 │   └── rpc_handlers.go      # ALL RPC methods that nodes expose
-│                               - Put/Get/Delete (with auto-replication)
+│                               - Put/Get/Delete (with partition-aware replication)
+│                               - GetPartitionInfo: query partition ownership
 │                               - Election/Coordinator/Heartbeat (Bully)
 │                               - RequestCS/ReleaseCS (Ricart-Agrawala)
 │                               - DAGLock/DAGUnlock/DAGDetect/DAGResolve
 │                               - MutexPut (combines mutex + put + replicate)
 │                               - Status/ListKeys
+│
+├── partition/
+│   ├── consistent_hash.go    # Consistent hashing for data partitioning
+│   │                          - Hash ring with virtual nodes
+│   │                          - GetNode(): single placement
+│   │                          - GetNodes(): replica placement
+│   │
+│   └── partition_manager.go  # Partition assignment management
+│                               - Enable/disable partitioning
+│                               - GetPartitionOwners(): which nodes own a key
+│                               - IsOwner/IsPrimaryOwner(): query ownership
+│                               - SetReplicationFactor(): replica count
 │
 ├── election/
 │   └── bully.go             # Bully Algorithm implementation
@@ -94,6 +108,7 @@ dynamo-go/
 ├── client/
 │   └── client.go            # Interactive CLI client
 │                               - put/get/delete: basic storage operations
+│                               - partition-info: query partition ownership
 │                               - status/list: cluster monitoring
 │                               - mutex-put: Ricart-Agrawala protected write
 │                               - deadlock-test: full DAG demo scenario
@@ -590,5 +605,43 @@ Press **Ctrl+C** on the laptop whose node you want to kill. Watch other laptops'
 | `heartbeat_interval_ms` | How often leader sends heartbeat (3 seconds) |
 | `election_timeout_ms` | How long to wait before declaring leader dead (5 seconds) |
 | `deadlock_timeout_ms` | Timeout for deadlock-related operations (5 seconds) |
+| `partition.enabled` | Enable data partitioning with consistent hashing (default: false) |
+| `partition.replication_factor` | Number of replicas per key (default: 3) |
+
+---
+
+## Data Partitioning (Optional)
+
+By default, this system uses **full replication** (every node stores every key). For scalability, you can enable **DynamoDB-style data partitioning** using consistent hashing.
+
+**Key Benefits:**
+- Store only your partition's data, not all data
+- Scales to hundreds of nodes efficiently
+- Still maintains configurable replication for fault tolerance
+- Backward compatible (toggle on/off in config)
+
+**Enable in config.json:**
+```json
+{
+    "partition": {
+        "enabled": true,
+        "replication_factor": 3
+    }
+}
+```
+
+**Check partition ownership:**
+```bash
+> partition-info <node_id> <key>
+Primary Owner: Node 1
+Replicas: Node 2, Node 3
+```
+
+**See [PARTITIONING.md](PARTITIONING.md) for detailed documentation:**
+- How consistent hashing works
+- Configuration options
+- Scaling considerations
+- API examples
+- Performance characteristics
 
 ---
